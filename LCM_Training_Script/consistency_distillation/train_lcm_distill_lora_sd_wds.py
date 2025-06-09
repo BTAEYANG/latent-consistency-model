@@ -232,6 +232,100 @@ class Text2ImageDataset:
         return self._train_dataloader
 
 
+class CIFAR10DatasetForLCM:
+    def __init__(
+        self,
+        dataset_path,
+        num_train_examples,
+        per_gpu_batch_size,
+        global_batch_size,
+        num_workers,
+        resolution=512,
+        pin_memory=False,
+        persistent_workers=False,
+    ):
+        from torchvision.datasets import CIFAR10
+        from torch.utils.data import DataLoader, Dataset
+        
+        # Define better prompts for each class
+        self.prompts = [
+            "a photograph of an airplane in the sky",
+            "a photograph of a car on the road",
+            "a photograph of a bird in nature",
+            "a photograph of a domestic cat",
+            "a photograph of a deer in the forest",
+            "a photograph of a dog",
+            "a photograph of a frog",
+            "a photograph of a horse in a field",
+            "a photograph of a ship on the water",
+            "a photograph of a truck on the road"
+        ]
+        
+        class CustomCIFAR10(Dataset):
+            def __init__(self, root, train=True, transform=None, prompts=None):
+                self.cifar = CIFAR10(root=root, train=train, download=True)
+                self.transform = transform
+                self.prompts = prompts
+                
+            def __len__(self):
+                return len(self.cifar)
+                
+            def __getitem__(self, idx):
+                image, label = self.cifar[idx]
+                
+                if self.transform:
+                    image = self.transform(image)
+                
+                # Get the appropriate prompt for this class
+                text = self.prompts[label] if self.prompts else f"a photo of a {self.cifar.classes[label]}"
+                    
+                # Return in the format expected by the training code
+                return image, text, None, None
+        
+        # Set up transformations for CIFAR-10
+        transform = transforms.Compose([
+            transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        ])
+        
+        # Create the dataset
+        self._train_dataset = CustomCIFAR10(
+            root=dataset_path, 
+            train=True, 
+            transform=transform, 
+            prompts=self.prompts
+        )
+        
+        # Create dataloader
+        self._train_dataloader = DataLoader(
+            self._train_dataset,
+            batch_size=per_gpu_batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+        )
+        
+        # Calculate number of batches and samples (to match the original code's expectations)
+        num_batches = len(self._train_dataloader)
+        if num_train_examples is not None:
+            num_samples = min(len(self._train_dataset), num_train_examples)
+        else:
+            num_samples = len(self._train_dataset)
+        
+        self._train_dataloader.num_batches = num_batches
+        self._train_dataloader.num_samples = num_samples
+
+    @property
+    def train_dataset(self):
+        return self._train_dataset
+
+    @property
+    def train_dataloader(self):
+        return self._train_dataloader
+
+
 def log_validation(vae, unet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
 
@@ -259,11 +353,20 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
+    # Generate validation prompts
+    # validation_prompts = [
+    #     "portrait photo of a girl, photograph, highly detailed face, depth of field, moody light, golden hour, style by Dan Winters, Russell James, Steve McCurry, centered, extremely detailed, Nikon D850, award winning photography",
+    #     "Self-portrait oil painting, a beautiful cyborg with golden hair, 8k",
+    #     "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k",
+    #     "A photo of beautiful mountain with realistic sunset and blue lake, highly detailed, masterpiece",
+    # ]
+    
+    # Replace the validation_prompts in the log_validation function
     validation_prompts = [
-        "portrait photo of a girl, photograph, highly detailed face, depth of field, moody light, golden hour, style by Dan Winters, Russell James, Steve McCurry, centered, extremely detailed, Nikon D850, award winning photography",
-        "Self-portrait oil painting, a beautiful cyborg with golden hair, 8k",
-        "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k",
-        "A photo of beautiful mountain with realistic sunset and blue lake, highly detailed, masterpiece",
+        "a photograph of an airplane in the sky, detailed, high quality",
+        "a photograph of a car on the road, detailed, high quality",
+        "a photograph of a bird in nature, detailed, high quality",
+        "a photograph of a domestic cat, detailed, high quality",
     ]
 
     image_logs = []
@@ -443,6 +546,23 @@ def import_model_class_from_model_name_or_path(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
+    
+    # Add this to the existing parse_args() function
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="webdataset",
+        choices=["webdataset", "cifar10"],
+        help="Type of dataset to use for training",
+    )
+
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default="./data",
+        help="Path where the dataset will be stored (for CIFAR-10)",
+    )
+    
     # ----------Model Checkpoint Loading Arguments----------
     parser.add_argument(
         "--pretrained_teacher_model",
@@ -1019,18 +1139,33 @@ def main(args):
         prompt_embeds = encode_prompt(prompt_batch, text_encoder, tokenizer, proportion_empty_prompts, is_train)
         return {"prompt_embeds": prompt_embeds}
 
-    dataset = Text2ImageDataset(
-        train_shards_path_or_url=args.train_shards_path_or_url,
-        num_train_examples=args.max_train_samples,
-        per_gpu_batch_size=args.train_batch_size,
-        global_batch_size=args.train_batch_size * accelerator.num_processes,
-        num_workers=args.dataloader_num_workers,
-        resolution=args.resolution,
-        shuffle_buffer_size=1000,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-    train_dataloader = dataset.train_dataloader
+    # Replace the dataset creation section in main()
+    if args.dataset_type == "cifar10":
+        dataset = CIFAR10DatasetForLCM(
+            dataset_path=args.dataset_path,
+            num_train_examples=args.max_train_samples,
+            per_gpu_batch_size=args.train_batch_size,
+            global_batch_size=args.train_batch_size * accelerator.num_processes,
+            num_workers=args.dataloader_num_workers,
+            resolution=args.resolution,
+            pin_memory=True,
+            persistent_workers=True,
+        )
+        train_dataloader = dataset.train_dataloader
+    else:
+        # Original webdataset code
+        dataset = Text2ImageDataset(
+            train_shards_path_or_url=args.train_shards_path_or_url,
+            num_train_examples=args.max_train_samples,
+            per_gpu_batch_size=args.train_batch_size,
+            global_batch_size=args.train_batch_size * accelerator.num_processes,
+            num_workers=args.dataloader_num_workers,
+            resolution=args.resolution,
+            shuffle_buffer_size=1000,
+            pin_memory=True,
+            persistent_workers=True,
+        )
+        train_dataloader = dataset.train_dataloader
 
     compute_embeddings_fn = functools.partial(
         compute_embeddings,
